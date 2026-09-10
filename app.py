@@ -132,6 +132,69 @@ with st.expander("➕ Agregar prospecto nuevo"):
                 st.success(f"{nombre} agregado correctamente.")
                 st.rerun()
 
+# ---------- Carga masiva desde Excel/CSV ----------
+def limpiar_valor(v):
+    if pd.isna(v):
+        return None
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v).strip()
+
+with st.expander("📤 Cargar varios prospectos desde un Excel"):
+    archivo = st.file_uploader("Selecciona tu archivo (.xlsx o .csv)", type=["xlsx", "xls", "csv"])
+    if archivo is not None:
+        try:
+            df_excel = pd.read_csv(archivo) if archivo.name.lower().endswith(".csv") else pd.read_excel(archivo)
+        except Exception as e:
+            st.error(f"No se pudo leer el archivo: {e}")
+            df_excel = None
+
+        if df_excel is not None and len(df_excel) > 0:
+            st.write("Vista previa de tu archivo:")
+            st.dataframe(df_excel.head(), use_container_width=True)
+
+            columnas = list(df_excel.columns)
+            opciones = ["(ninguna)"] + columnas
+            st.caption("Indica qué columna de tu Excel corresponde a cada dato:")
+            c1, c2 = st.columns(2)
+            col_nombre = c1.selectbox("Columna del Nombre", columnas)
+            col_dni = c2.selectbox("Columna del DNI", opciones)
+            col_tel = c1.selectbox("Columna del Teléfono", opciones)
+            col_fecha = c2.selectbox("Columna de Fecha de inicio", opciones)
+            fecha_defecto = st.date_input(
+                "Fecha a usar si no hay columna de fecha (o si alguna fila viene vacía)",
+                value=date.today(),
+            )
+
+            if st.button("Cargar todos los prospectos del Excel"):
+                insertados, omitidos = 0, 0
+                for _, fila in df_excel.iterrows():
+                    nombre_val = limpiar_valor(fila[col_nombre]) if col_nombre in fila else None
+                    if not nombre_val:
+                        omitidos += 1
+                        continue
+                    dni_val = limpiar_valor(fila[col_dni]) if col_dni != "(ninguna)" else None
+                    tel_val = limpiar_valor(fila[col_tel]) if col_tel != "(ninguna)" else None
+                    if col_fecha != "(ninguna)":
+                        try:
+                            fecha_val = pd.to_datetime(fila[col_fecha]).date()
+                        except Exception:
+                            fecha_val = fecha_defecto
+                    else:
+                        fecha_val = fecha_defecto
+
+                    nuevo = supabase.table("prospectos").insert({
+                        "nombre": nombre_val, "dni": dni_val, "telefono": tel_val,
+                        "inicio": fecha_val.isoformat(),
+                    }).execute().data[0]
+                    supabase.table("pagos").insert({
+                        "prospecto_id": nuevo["id"], "cuota_idx": 0, "fecha": fecha_val.isoformat(),
+                    }).execute()
+                    insertados += 1
+
+                st.success(f"Se cargaron {insertados} prospectos correctamente." + (f" ({omitidos} filas sin nombre se omitieron.)" if omitidos else ""))
+                st.rerun()
+
 # ---------- Lista + ranking ----------
 st.subheader("Prospectos")
 
