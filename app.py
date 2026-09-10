@@ -162,7 +162,7 @@ else:
         return ""
 
     st.dataframe(
-        tabla.style.applymap(color_estado, subset=["Estado"]),
+        tabla.style.map(color_estado, subset=["Estado"]),
         use_container_width=True, hide_index=True,
     )
 
