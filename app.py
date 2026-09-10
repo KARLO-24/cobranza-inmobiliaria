@@ -134,34 +134,37 @@ with st.expander("➕ Agregar prospecto nuevo"):
 
 # ---------- Lista + ranking ----------
 st.subheader("Prospectos")
-orden = st.radio("Ordenar por:", ["Más cerca de terminar", "Más lejos de terminar", "Más urgente"], horizontal=True)
 
-if orden == "Más cerca de terminar":
-    filas.sort(key=lambda f: (-f["pagadas"], f["saldo"]))
-elif orden == "Más lejos de terminar":
-    filas.sort(key=lambda f: (f["pagadas"], -f["saldo"]))
+if not filas:
+    st.info("Todavía no hay prospectos registrados. Usa '➕ Agregar prospecto nuevo' arriba para empezar.")
 else:
-    filas.sort(key=lambda f: f["dias_hasta"])
+    orden = st.radio("Ordenar por:", ["Más cerca de terminar", "Más lejos de terminar", "Más urgente"], horizontal=True)
 
-tabla = pd.DataFrame([{
-    "Nombre": f["nombre"],
-    "DNI": f.get("dni") or "—",
-    "Cuotas": f"{f['pagadas']}/{TOTAL_CUOTAS}",
-    "Saldo": soles(f["saldo"]),
-    "Estado": CHIP_LABEL[f["chip"]] + (f" ({abs(f['dias_hasta'])}d)" if f["chip"] == "late" else ""),
-    "id": f["id"],
-} for f in filas])
+    if orden == "Más cerca de terminar":
+        filas.sort(key=lambda f: (-f["pagadas"], f["saldo"]))
+    elif orden == "Más lejos de terminar":
+        filas.sort(key=lambda f: (f["pagadas"], -f["saldo"]))
+    else:
+        filas.sort(key=lambda f: f["dias_hasta"])
 
-def color_estado(val):
-    for chip, label in CHIP_LABEL.items():
-        if val.startswith(label):
-            return f"background-color:{CHIP_BG[chip]}; color:{CHIP_COLOR[chip]}; font-weight:600;"
-    return ""
+    tabla = pd.DataFrame([{
+        "Nombre": f["nombre"],
+        "DNI": f.get("dni") or "—",
+        "Cuotas": f"{f['pagadas']}/{TOTAL_CUOTAS}",
+        "Saldo": soles(f["saldo"]),
+        "Estado": CHIP_LABEL[f["chip"]] + (f" ({abs(f['dias_hasta'])}d)" if f["chip"] == "late" else ""),
+    } for f in filas])
 
-st.dataframe(
-    tabla.drop(columns=["id"]).style.applymap(color_estado, subset=["Estado"]),
-    use_container_width=True, hide_index=True,
-)
+    def color_estado(val):
+        for chip, label in CHIP_LABEL.items():
+            if val.startswith(label):
+                return f"background-color:{CHIP_BG[chip]}; color:{CHIP_COLOR[chip]}; font-weight:600;"
+        return ""
+
+    st.dataframe(
+        tabla.style.applymap(color_estado, subset=["Estado"]),
+        use_container_width=True, hide_index=True,
+    )
 
 # ---------- Detalle de un cliente ----------
 st.subheader("Ficha del cliente")
