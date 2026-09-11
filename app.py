@@ -195,13 +195,59 @@ else:
         k3.metric("Deuda total", soles(f["monto_total"]))
 
         st.markdown("**Cronograma de pagos**")
-        cronograma = pd.DataFrame([{
-            "N°": c["numero"], "Vence": c["fecha_vencimiento"], "Monto": soles(c["monto"]),
-            "Estado": "Pagado" if c["pagado"] else "Pendiente",
-            "Fecha de pago": c["fecha_pago"] or "—",
-            "Importe pagado": soles(c["importe_pagado"]) if c["importe_pagado"] else "—",
+        st.caption("Edita montos, fechas o el estado de pago directamente en la tabla. Puedes agregar cuotas nuevas (por ejemplo si la casa subió de precio) o eliminar filas con el ícono de la papelera. La cuota N° 0 es la inicial.")
+
+        crono_df = pd.DataFrame([{
+            "id": c["id"],
+            "N°": c["numero"],
+            "Vence": pd.to_datetime(c["fecha_vencimiento"]).date(),
+            "Monto": float(c["monto"]),
+            "Pagado": bool(c["pagado"]),
+            "Fecha de pago": pd.to_datetime(c["fecha_pago"]).date() if c["fecha_pago"] else None,
+            "Importe pagado": float(c["importe_pagado"]) if c["importe_pagado"] is not None else None,
         } for c in f["cuotas"]])
-        st.dataframe(cronograma, use_container_width=True, hide_index=True)
+
+        edited = st.data_editor(
+            crono_df,
+            key=f"crono_{f['id']}",
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            column_order=["N°", "Vence", "Monto", "Pagado", "Fecha de pago", "Importe pagado"],
+            column_config={
+                "N°": st.column_config.NumberColumn("N° (0 = inicial)", step=1),
+                "Vence": st.column_config.DateColumn("Vence"),
+                "Monto": st.column_config.NumberColumn("Monto (S/)", min_value=0.0, step=50.0),
+                "Pagado": st.column_config.CheckboxColumn("Pagado"),
+                "Fecha de pago": st.column_config.DateColumn("Fecha de pago"),
+                "Importe pagado": st.column_config.NumberColumn("Importe pagado (S/)", min_value=0.0, step=50.0),
+            },
+        )
+
+        if st.button("💾 Guardar cambios en el cronograma", key=f"save_crono_{f['id']}"):
+            ids_originales = set(crono_df["id"].dropna().astype(int))
+            ids_editados = set(edited["id"].dropna().astype(int)) if "id" in edited.columns else set()
+            for cid in ids_originales - ids_editados:
+                supabase.table("cuotas").delete().eq("id", int(cid)).execute()
+
+            for _, row in edited.iterrows():
+                payload = {
+                    "numero": int(row["N°"]) if pd.notna(row["N°"]) else 0,
+                    "fecha_vencimiento": row["Vence"].isoformat() if pd.notna(row["Vence"]) else date.today().isoformat(),
+                    "monto": float(row["Monto"]) if pd.notna(row["Monto"]) else 0,
+                    "pagado": bool(row["Pagado"]) if pd.notna(row["Pagado"]) else False,
+                    "fecha_pago": row["Fecha de pago"].isoformat() if pd.notna(row["Fecha de pago"]) else None,
+                    "importe_pagado": float(row["Importe pagado"]) if pd.notna(row["Importe pagado"]) else None,
+                }
+                tiene_id = "id" in row and pd.notna(row["id"])
+                if tiene_id:
+                    supabase.table("cuotas").update(payload).eq("id", int(row["id"])).execute()
+                else:
+                    payload["prospecto_id"] = f["id"]
+                    supabase.table("cuotas").insert(payload).execute()
+
+            st.success("Cronograma actualizado.")
+            st.rerun()
 
         if st.button("🗑️ Eliminar cliente", key=f"del_{f['id']}"):
             supabase.table("prospectos").delete().eq("id", f["id"]).execute()
