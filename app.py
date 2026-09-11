@@ -6,60 +6,40 @@ from supabase import create_client, Client
 
 st.set_page_config(page_title="Cobranza Inmobiliaria", layout="wide")
 
-# =========================================================
-# Conexión a Supabase
-# =========================================================
 @st.cache_resource
 def get_client() -> Client:
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 supabase = get_client()
 
-# =========================================================
-# Reglas del plan de pagos: 17 cuotas
-# 0 = inicial (5000) | 1..15 = mensuales (1000) | 16 = final (10000)
-# =========================================================
-TOTAL_CUOTAS = 17
-TOTAL_CASA = 30000
-
-def cuota_monto(i):
-    if i == 0:
-        return 5000
-    if i == 16:
-        return 10000
-    return 1000
+def soles(n):
+    n = float(n or 0)
+    return f"S/ {n:,.2f}" if n % 1 else f"S/ {n:,.0f}"
 
 # =========================================================
 # Datos
 # =========================================================
 def cargar_datos():
     prospectos = supabase.table("prospectos").select("*").order("id").execute().data
-    pagos = supabase.table("pagos").select("*").order("fecha").execute().data
-    return prospectos, pagos
+    cuotas = supabase.table("cuotas").select("*").order("numero").execute().data
+    return prospectos, cuotas
 
-def pagos_de(prospecto_id, pagos):
-    return sorted([p for p in pagos if p["prospecto_id"] == prospecto_id], key=lambda p: p["cuota_idx"])
+def cuotas_de(pid, cuotas):
+    return sorted([c for c in cuotas if c["prospecto_id"] == pid], key=lambda c: c["numero"])
 
-def calcular(prospecto, pagos_cliente):
-    inicio = date.fromisoformat(prospecto["inicio"])
-    pagadas = len(pagos_cliente)
-    completado = pagadas >= TOTAL_CUOTAS
-    pagado = sum(cuota_monto(i) for i in range(pagadas))
-    saldo = TOTAL_CASA - pagado
+def calcular(p, cuotas_cli):
+    monto_total = sum(float(c["monto"]) for c in cuotas_cli)
+    pagado = sum(float(c["importe_pagado"] or 0) for c in cuotas_cli if c["pagado"])
+    saldo = round(monto_total - pagado, 2)
+    pendientes = [c for c in cuotas_cli if not c["pagado"]]
+    completado = len(pendientes) == 0
 
     if completado:
-        proxima_idx = None
-        fecha_proxima = None
-        dias_hasta = 9999
-        monto_proxima = 0
-        chip = "done"
+        chip, dias_hasta, proxima = "done", 9999, None
     else:
-        proxima_idx = pagadas
-        fecha_proxima = inicio + relativedelta(months=proxima_idx)
-        dias_hasta = (fecha_proxima - date.today()).days
-        monto_proxima = cuota_monto(proxima_idx)
+        proxima = min(pendientes, key=lambda c: c["fecha_vencimiento"])
+        fecha_prox = date.fromisoformat(proxima["fecha_vencimiento"])
+        dias_hasta = (fecha_prox - date.today()).days
         if dias_hasta < 0:
             chip = "late"
         elif dias_hasta <= 1:
@@ -67,154 +47,122 @@ def calcular(prospecto, pagos_cliente):
         else:
             chip = "ok"
 
+    pct = round((pagado / monto_total) * 100) if monto_total else 0
     return {
-        "pagadas": pagadas, "completado": completado, "pagado": pagado, "saldo": saldo,
-        "proxima_idx": proxima_idx, "fecha_proxima": fecha_proxima,
-        "dias_hasta": dias_hasta, "monto_proxima": monto_proxima, "chip": chip,
+        "monto_total": monto_total, "pagado": pagado, "saldo": saldo,
+        "completado": completado, "proxima": proxima, "dias_hasta": dias_hasta,
+        "chip": chip, "pct": pct,
     }
 
 CHIP_LABEL = {"ok": "Al día", "soon": "Vence mañana", "late": "Atrasado", "done": "Completado"}
 CHIP_COLOR = {"ok": "#1F5C3F", "soon": "#B9722A", "late": "#A83A2E", "done": "#9C7A22"}
 CHIP_BG = {"ok": "#DCE9DF", "soon": "#F3E3CE", "late": "#F2DAD4", "done": "#EFE3BC"}
 
-def soles(n):
-    return f"S/ {n:,.0f}"
-
 # =========================================================
-# Interfaz
-# =========================================================
-st.title("Registro de Cobranza — Inmobiliaria")
+st.title("Registro de Cobranza")
 st.caption("Quién te debe, cuánto y cuándo le toca pagar, en un vistazo.")
 
-prospectos, pagos = cargar_datos()
-
+prospectos, cuotas = cargar_datos()
 filas = []
 for p in prospectos:
-    pc = pagos_de(p["id"], pagos)
-    d = calcular(p, pc)
-    filas.append({**p, **d})
+    cc = cuotas_de(p["id"], cuotas)
+    d = calcular(p, cc)
+    filas.append({**p, **d, "cuotas": cc})
 
 # ---------- Estadísticas ----------
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Clientes activos", len(filas))
 c2.metric("Te deben hoy", sum(1 for f in filas if f["chip"] == "late"))
 c3.metric("Vencen mañana", sum(1 for f in filas if f["chip"] == "soon"))
-total_posible = len(filas) * TOTAL_CASA
+total_posible = sum(f["monto_total"] for f in filas)
 total_cobrado = sum(f["pagado"] for f in filas)
-pct = round(total_cobrado / total_posible * 100) if total_posible else 0
-c4.metric("Cobrado del total", f"{pct}%")
+c4.metric("Cobrado del total", f"{round(total_cobrado/total_posible*100) if total_posible else 0}%")
 
 st.divider()
 
-# ---------- Agregar prospecto ----------
-with st.expander("➕ Agregar prospecto nuevo"):
-    with st.form("nuevo_prospecto", clear_on_submit=True):
-        colA, colB = st.columns(2)
-        nombre = colA.text_input("Nombre completo")
-        dni = colB.text_input("DNI")
-        telefono = colA.text_input("Teléfono")
-        inicio = colB.date_input("Fecha de inicio del plan", value=date.today())
-        enviado = st.form_submit_button("Guardar prospecto")
-        if enviado:
-            if not nombre.strip():
-                st.error("Ingresa al menos el nombre.")
+# ---------- Registrar cliente nuevo ----------
+with st.expander("➕ Registrar cliente nuevo"):
+    colA, colB = st.columns(2)
+    nombre = colA.text_input("Nombre completo", key="reg_nombre")
+    dni = colB.text_input("DNI", key="reg_dni")
+    telefono = colA.text_input("Celular", key="reg_tel")
+    forma_pago = colB.radio("Forma de pago", ["CREDITO", "CONTADO"], horizontal=True, key="reg_forma")
+    fecha_inicio = st.date_input("Fecha de inicio", value=date.today(), key="reg_inicio")
+
+    if forma_pago == "CONTADO":
+        monto_contado = st.number_input("Monto pagado al contado (S/)", min_value=0.0, step=100.0, key="reg_contado")
+        if st.button("Registrar cliente al contado"):
+            if not nombre.strip() or monto_contado <= 0:
+                st.error("Ingresa el nombre y el monto.")
             else:
                 nuevo = supabase.table("prospectos").insert({
-                    "nombre": nombre.strip(),
-                    "dni": dni.strip() or None,
-                    "telefono": telefono.strip() or None,
-                    "inicio": inicio.isoformat(),
+                    "nombre": nombre.strip(), "dni": dni.strip() or None, "telefono": telefono.strip() or None,
+                    "forma_pago": "CONTADO", "fecha_inicio": fecha_inicio.isoformat(),
                 }).execute().data[0]
-                # la cuota inicial (índice 0) se registra pagada el día de la firma
-                supabase.table("pagos").insert({
-                    "prospecto_id": nuevo["id"], "cuota_idx": 0, "fecha": inicio.isoformat(),
+                supabase.table("cuotas").insert({
+                    "prospecto_id": nuevo["id"], "numero": 0, "fecha_vencimiento": fecha_inicio.isoformat(),
+                    "monto": monto_contado, "pagado": True,
+                    "fecha_pago": fecha_inicio.isoformat(), "importe_pagado": monto_contado,
                 }).execute()
-                st.success(f"{nombre} agregado correctamente.")
+                st.success(f"{nombre} registrado (pago al contado).")
                 st.rerun()
+    else:
+        st.markdown("**Cronograma de pagos al crédito**")
+        c1_, c2_, c3_ = st.columns(3)
+        monto_inicial = c1_.number_input("Cuota inicial (S/)", min_value=0.0, step=100.0, key="reg_inicial")
+        n_cuotas = c2_.number_input("N° de cuotas mensuales", min_value=0, step=1, key="reg_ncuotas")
+        monto_cuota = c3_.number_input("Monto de cada cuota mensual (S/)", min_value=0.0, step=50.0, key="reg_montocuota")
 
-# ---------- Carga masiva desde Excel/CSV ----------
-def limpiar_valor(v):
-    if pd.isna(v):
-        return None
-    if isinstance(v, float) and v.is_integer():
-        return str(int(v))
-    return str(v).strip()
+        total_preview = monto_inicial + n_cuotas * monto_cuota
+        st.caption(f"Total del crédito: {soles(total_preview)} ({int(n_cuotas)+1 if monto_inicial>0 else int(n_cuotas)} cuotas en total)")
 
-with st.expander("📤 Cargar varios prospectos desde un Excel"):
-    archivo = st.file_uploader("Selecciona tu archivo (.xlsx o .csv)", type=["xlsx", "xls", "csv"])
-    if archivo is not None:
-        try:
-            df_excel = pd.read_csv(archivo) if archivo.name.lower().endswith(".csv") else pd.read_excel(archivo)
-        except Exception as e:
-            st.error(f"No se pudo leer el archivo: {e}")
-            df_excel = None
-
-        if df_excel is not None and len(df_excel) > 0:
-            st.write("Vista previa de tu archivo:")
-            st.dataframe(df_excel.head(), use_container_width=True)
-
-            columnas = list(df_excel.columns)
-            opciones = ["(ninguna)"] + columnas
-            st.caption("Indica qué columna de tu Excel corresponde a cada dato:")
-            c1, c2 = st.columns(2)
-            col_nombre = c1.selectbox("Columna del Nombre", columnas)
-            col_dni = c2.selectbox("Columna del DNI", opciones)
-            col_tel = c1.selectbox("Columna del Teléfono", opciones)
-            col_fecha = c2.selectbox("Columna de Fecha de inicio", opciones)
-            fecha_defecto = st.date_input(
-                "Fecha a usar si no hay columna de fecha (o si alguna fila viene vacía)",
-                value=date.today(),
-            )
-
-            if st.button("Cargar todos los prospectos del Excel"):
-                insertados, omitidos = 0, 0
-                for _, fila in df_excel.iterrows():
-                    nombre_val = limpiar_valor(fila[col_nombre]) if col_nombre in fila else None
-                    if not nombre_val:
-                        omitidos += 1
-                        continue
-                    dni_val = limpiar_valor(fila[col_dni]) if col_dni != "(ninguna)" else None
-                    tel_val = limpiar_valor(fila[col_tel]) if col_tel != "(ninguna)" else None
-                    if col_fecha != "(ninguna)":
-                        try:
-                            fecha_val = pd.to_datetime(fila[col_fecha]).date()
-                        except Exception:
-                            fecha_val = fecha_defecto
-                    else:
-                        fecha_val = fecha_defecto
-
-                    nuevo = supabase.table("prospectos").insert({
-                        "nombre": nombre_val, "dni": dni_val, "telefono": tel_val,
-                        "inicio": fecha_val.isoformat(),
-                    }).execute().data[0]
-                    supabase.table("pagos").insert({
-                        "prospecto_id": nuevo["id"], "cuota_idx": 0, "fecha": fecha_val.isoformat(),
-                    }).execute()
-                    insertados += 1
-
-                st.success(f"Se cargaron {insertados} prospectos correctamente." + (f" ({omitidos} filas sin nombre se omitieron.)" if omitidos else ""))
+        if st.button("Generar cronograma y registrar cliente"):
+            if not nombre.strip():
+                st.error("Ingresa el nombre.")
+            elif monto_inicial <= 0 and n_cuotas == 0:
+                st.error("Ingresa al menos la cuota inicial o las cuotas mensuales.")
+            else:
+                nuevo = supabase.table("prospectos").insert({
+                    "nombre": nombre.strip(), "dni": dni.strip() or None, "telefono": telefono.strip() or None,
+                    "forma_pago": "CREDITO", "fecha_inicio": fecha_inicio.isoformat(),
+                }).execute().data[0]
+                filas_cuotas = []
+                numero = 0
+                if monto_inicial > 0:
+                    filas_cuotas.append({
+                        "prospecto_id": nuevo["id"], "numero": 0,
+                        "fecha_vencimiento": fecha_inicio.isoformat(), "monto": monto_inicial,
+                    })
+                    numero = 1
+                for i in range(int(n_cuotas)):
+                    fecha_c = fecha_inicio + relativedelta(months=numero)
+                    filas_cuotas.append({
+                        "prospecto_id": nuevo["id"], "numero": numero,
+                        "fecha_vencimiento": fecha_c.isoformat(), "monto": monto_cuota,
+                    })
+                    numero += 1
+                supabase.table("cuotas").insert(filas_cuotas).execute()
+                st.success(f"{nombre} registrado con su cronograma de {len(filas_cuotas)} cuotas.")
                 st.rerun()
 
 # ---------- Lista + ranking ----------
 st.subheader("Prospectos")
 
 if not filas:
-    st.info("Todavía no hay prospectos registrados. Usa '➕ Agregar prospecto nuevo' arriba para empezar.")
+    st.info("Todavía no hay clientes registrados. Usa '➕ Registrar cliente nuevo' arriba para empezar.")
 else:
     orden = st.radio("Ordenar por:", ["Más cerca de terminar", "Más lejos de terminar", "Más urgente"], horizontal=True)
-
     if orden == "Más cerca de terminar":
-        filas.sort(key=lambda f: (-f["pagadas"], f["saldo"]))
+        filas.sort(key=lambda f: (-f["pct"], f["saldo"]))
     elif orden == "Más lejos de terminar":
-        filas.sort(key=lambda f: (f["pagadas"], -f["saldo"]))
+        filas.sort(key=lambda f: (f["pct"], -f["saldo"]))
     else:
         filas.sort(key=lambda f: f["dias_hasta"])
 
     tabla = pd.DataFrame([{
-        "Nombre": f["nombre"],
-        "DNI": f.get("dni") or "—",
-        "Cuotas": f"{f['pagadas']}/{TOTAL_CUOTAS}",
-        "Saldo": soles(f["saldo"]),
+        "Nombre": f["nombre"], "DNI": f.get("dni") or "—",
+        "Forma": f.get("forma_pago") or "—",
+        "Avance": f"{f['pct']}%", "Saldo": soles(f["saldo"]),
         "Estado": CHIP_LABEL[f["chip"]] + (f" ({abs(f['dias_hasta'])}d)" if f["chip"] == "late" else ""),
     } for f in filas])
 
@@ -224,73 +172,58 @@ else:
                 return f"background-color:{CHIP_BG[chip]}; color:{CHIP_COLOR[chip]}; font-weight:600;"
         return ""
 
-    st.dataframe(
-        tabla.style.map(color_estado, subset=["Estado"]),
-        use_container_width=True, hide_index=True,
-    )
+    st.dataframe(tabla.style.map(color_estado, subset=["Estado"]), use_container_width=True, hide_index=True)
 
-# ---------- Detalle de un cliente ----------
+# ---------- Ficha del cliente ----------
 st.subheader("Ficha del cliente")
 nombres = {f["id"]: f["nombre"] for f in filas}
 if not filas:
-    st.info("Agrega tu primer prospecto arriba para ver su ficha aquí.")
+    st.info("Registra tu primer cliente arriba para ver su ficha aquí.")
 else:
-    seleccion_id = st.selectbox(
-        "Selecciona un cliente", options=list(nombres.keys()),
-        format_func=lambda i: nombres[i],
-    )
+    seleccion_id = st.selectbox("Selecciona un cliente", options=list(nombres.keys()), format_func=lambda i: nombres[i])
     f = next(x for x in filas if x["id"] == seleccion_id)
 
     col1, col2 = st.columns([2, 1])
     with col1:
         st.markdown(f"### {f['nombre']}")
-        st.caption(f"DNI {f.get('dni') or '—'} · Tel. {f.get('telefono') or '—'}")
-        st.progress(f["pagadas"] / TOTAL_CUOTAS, text=f"{f['pagadas']} de {TOTAL_CUOTAS} cuotas pagadas")
+        st.caption(f"DNI {f.get('dni') or '—'} · Cel. {f.get('telefono') or '—'} · {f.get('forma_pago')}")
+        st.progress(min(f["pct"] / 100, 1.0), text=f"{f['pct']}% pagado")
 
-        kcol1, kcol2, kcol3 = st.columns(3)
-        kcol1.metric("Pagado", soles(f["pagado"]))
-        kcol2.metric("Saldo", soles(f["saldo"]))
-        kcol3.metric("Inicio", date.fromisoformat(f["inicio"]).strftime("%d/%m/%Y"))
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Pagado", soles(f["pagado"]))
+        k2.metric("Saldo (debe)", soles(f["saldo"]))
+        k3.metric("Deuda total", soles(f["monto_total"]))
 
-        with st.expander("Editar datos del cliente"):
-            with st.form(f"editar_{f['id']}"):
-                n_nombre = st.text_input("Nombre", value=f["nombre"])
-                n_dni = st.text_input("DNI", value=f.get("dni") or "")
-                n_tel = st.text_input("Teléfono", value=f.get("telefono") or "")
-                if st.form_submit_button("Guardar cambios"):
-                    supabase.table("prospectos").update({
-                        "nombre": n_nombre.strip(), "dni": n_dni.strip() or None,
-                        "telefono": n_tel.strip() or None,
-                    }).eq("id", f["id"]).execute()
-                    st.success("Datos actualizados.")
-                    st.rerun()
+        st.markdown("**Cronograma de pagos**")
+        cronograma = pd.DataFrame([{
+            "N°": c["numero"], "Vence": c["fecha_vencimiento"], "Monto": soles(c["monto"]),
+            "Estado": "Pagado" if c["pagado"] else "Pendiente",
+            "Fecha de pago": c["fecha_pago"] or "—",
+            "Importe pagado": soles(c["importe_pagado"]) if c["importe_pagado"] else "—",
+        } for c in f["cuotas"]])
+        st.dataframe(cronograma, use_container_width=True, hide_index=True)
 
-        if st.button("🗑️ Eliminar prospecto", key=f"del_{f['id']}"):
+        if st.button("🗑️ Eliminar cliente", key=f"del_{f['id']}"):
             supabase.table("prospectos").delete().eq("id", f["id"]).execute()
-            st.success("Prospecto eliminado.")
+            st.success("Cliente eliminado.")
             st.rerun()
 
     with col2:
         if f["completado"]:
-            st.success("🎉 Plan completado — casa pagada al 100%.")
+            st.success("🎉 Crédito completado — deuda pagada al 100%.")
         else:
-            st.markdown(f"**Registrar cobro**")
-            st.caption(
-                f"Cuota {f['proxima_idx']+1} de {TOTAL_CUOTAS} · {soles(f['monto_proxima'])} "
-                f"· vence {f['fecha_proxima'].strftime('%d/%m/%Y')}"
-            )
+            prox = f["proxima"]
+            st.markdown("**Registrar pago**")
+            st.caption(f"Cuota N° {prox['numero']} · {soles(prox['monto'])} · vence {prox['fecha_vencimiento']}")
             fecha_pago = st.date_input("Fecha del pago", value=date.today(), key=f"fecha_{f['id']}")
-            if st.button("✅ Marcar como pagado", key=f"pagar_{f['id']}"):
-                supabase.table("pagos").insert({
-                    "prospecto_id": f["id"], "cuota_idx": f["proxima_idx"], "fecha": fecha_pago.isoformat(),
-                }).execute()
-                st.success("Pago registrado.")
-                st.rerun()
-
-            if f["pagadas"] > 0:
-                if st.button("Deshacer el último pago", key=f"undo_{f['id']}"):
-                    pc = pagos_de(f["id"], pagos)
-                    ultimo = pc[-1]
-                    supabase.table("pagos").delete().eq("id", ultimo["id"]).execute()
-                    st.success("Último pago eliminado.")
+            importe = st.number_input("Importe pagado (S/)", min_value=0.0, step=50.0,
+                                       value=float(prox["monto"]), key=f"importe_{f['id']}")
+            if st.button("✅ Registrar pago", key=f"pagar_{f['id']}"):
+                if importe <= 0:
+                    st.error("Ingresa un importe mayor a 0.")
+                else:
+                    supabase.table("cuotas").update({
+                        "pagado": True, "fecha_pago": fecha_pago.isoformat(), "importe_pagado": importe,
+                    }).eq("id", prox["id"]).execute()
+                    st.success("Pago registrado.")
                     st.rerun()
