@@ -6,6 +6,34 @@ from supabase import create_client, Client
 
 st.set_page_config(page_title="Cobranza Inmobiliaria", layout="wide")
 
+# =========================================================
+# Inicio de sesión
+# =========================================================
+def verificar_login():
+    if st.session_state.get("autenticado"):
+        return True
+    st.title("🔒 Iniciar sesión")
+    usuario = st.text_input("Usuario")
+    clave = st.text_input("Contraseña", type="password")
+    if st.button("Ingresar"):
+        usuarios = dict(st.secrets.get("usuarios", {}))
+        if usuario in usuarios and str(usuarios[usuario]) == clave:
+            st.session_state["autenticado"] = True
+            st.session_state["usuario_actual"] = usuario
+            st.rerun()
+        else:
+            st.error("Usuario o contraseña incorrectos.")
+    return False
+
+if not verificar_login():
+    st.stop()
+
+with st.sidebar:
+    st.write(f"Conectado como **{st.session_state.get('usuario_actual')}**")
+    if st.button("Cerrar sesión"):
+        st.session_state["autenticado"] = False
+        st.rerun()
+
 @st.cache_resource
 def get_client() -> Client:
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
